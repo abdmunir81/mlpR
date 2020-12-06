@@ -1,0 +1,320 @@
+"""
+    Title: Relative Strength Index (RSI) Strategy (Forex)
+    Description: This is a long short strategy based on RSI and moving average
+        dual signals. We also square off all positions at the end of the
+        day to avoid any roll-over costs. The trade size is fixed -
+        mini lotsize (1000) multiplied by a leverage. The leverage is a
+        parameter, defaults to 1. Minimum capital 1000.
+    Style tags: Momentum, Mean Reversion
+    Asset class: Equities, Futures, ETFs and Currencies
+    Dataset: FX Minute
+"""
+
+from blueshift_library.technicals.indicators import rsi, ema, roc
+from blueshift_library.utils.utils import square_off
+from sklearn.model_selection import train_test_split
+from  sklearn.neural_network import MLPRegressor
+import numpy as np
+ 
+
+
+
+# Zipline
+from zipline.finance import commission, slippage
+from zipline.api import(    symbol,
+                            order_target,
+                            set_commission,
+                            set_slippage,
+                            schedule_function,
+                            date_rules,
+                            time_rules,
+                            set_account_currency,
+                            order_target_percent,
+                            get_datetime
+                       )
+
+def initialize(context):
+    """
+        A function to define things to do at the start of the strategy
+    """
+    context.profit_target = 1.0
+    # set the account currency, only valid for backtests
+    set_account_currency("USD")
+
+    # lot-size (mini-lot for most brokers)
+    context.lot_size = 100000
+
+    # universe selection
+    context.securities = [
+                                              
+                            symbol('FXCM:AUD/USD'),
+                            symbol('FXCM:EUR/USD'),               
+                            symbol('FXCM:GBP/USD'),
+                            symbol('FXCM:NZD/USD'),
+                            symbol('FXCM:USD/CAD'),
+                            symbol('FXCM:USD/JPY'),
+                            symbol('FXCM:USD/CHF'),
+                          ]
+
+    # define strategy parameters
+    context.params = {'indicator_lookback':500,
+                      'indicator_freq':'1m',
+                      'buy_signal_threshold':0.5,
+                      'sell_signal_threshold':-0.5,
+                      'SMA_period_short':3,
+                      'SMA_period_long':39,
+                      'SMA_period_trend' : 220,
+                      'RSI_period'  : 39,
+                      'ROC_period':39,
+                      'trade_freq': 3,
+                      'leverage':0.25,
+                      'pip_cost':0.00003,
+                      'ANN_period': 10}
+
+    # variable to control trading frequency
+    context.bar_count = 0
+    context.trading_hours = False
+    # variables to track signals and target portfolio
+    context.signals = dict((security,0) for security in context.securities)
+    context.target_position = dict((security,0) for security in context.securities)
+    context.entry_price = dict((security,0) for security in context.securities)
+    context.entry_side = dict((security,0) for security in context.securities)
+    context.stoploss =  0.02 # percentage stoploss
+    context.profit = 0.01
+    context.datanew = dict((security,0) for security in context.securities)
+
+
+    # set trading cost and slippage to zero
+    set_commission(fx=commission.PipsCost(cost=context.params['pip_cost']))
+    set_slippage(fx=slippage.FixedSlippage(0.00))
+
+    # set a timeout for trading
+    schedule_function(stop_trading,
+                    date_rules.every_day(),
+                    time_rules.market_close(hours=0, minutes=10))
+    # call square off to zero out positions 30 minutes before close.
+    schedule_function(daily_square_off,
+                    date_rules.every_day(),
+                    time_rules.market_close(hours=0, minutes=30))
+
+    
+                      
+
+
+def before_trading_start(context, data):
+    """ set flag to true for trading. """
+    context.trading_hours = True
+
+def stop_trading(context, data):
+    """ stop trading and prepare to square off."""
+    context.trading_hours = False
+
+def daily_square_off(context, data):
+    """ square off all positions at the end of day."""
+    context.trading_hours = False
+    square_off(context)
+
+def handle_data(context, data):
+    """
+        A function to define things to do at every bar
+    """
+    if check_stop_loss(context,data):
+        print('{} check stop loss'.format(get_datetime()))
+        return
+
+    if check_take_prft(context,data):
+        print('{} got profit take'.format(get_datetime()))
+        return
+
+    if context.trading_hours == False:
+        return
+
+    context.bar_count = context.bar_count + 1
+    if context.bar_count < context.params['trade_freq']:
+        return
+    
+    if ann(context,data):
+        y_pred.any()
+        return
+
+    # time to trade, call the strategy function
+    context.bar_count = 30
+    run_strategy(context, data)
+
+
+def run_strategy(context, data):
+    """
+        A function to define core strategy steps
+    """
+    generate_signals(context, data)
+    generate_target_position(context, data)
+    rebalance(context, data)
+    calculate_entry_price(context,data)
+
+
+def rebalance(context,data):
+    """
+        A function to rebalance - all execution logic goes here
+    """
+    for security in context.securities:
+        order_target(security, context.target_position[security])
+
+def generate_target_position(context, data):
+    """
+        A function to define target portfolio
+    """
+    num_secs = len(context.securities)
+    weight = 3*context.params['leverage']\
+    *context.lot_size
+
+    for security in context.securities:
+        if context.signals[security] > context.params['buy_signal_threshold']:
+            context.target_position[security] = weight
+        elif context.signals[security] < context.params['sell_signal_threshold']:
+            context.target_position[security] = -weight
+        else:
+            context.target_position[security] = 0
+
+
+def generate_signals(context, data):
+    """
+        A function to define define the signal generation
+    """
+    
+    px  = price_data.loc[:,security].values
+
+    try:
+        price_data  = data.history(context.securities, 'close',
+            context.params['indicator_lookback'], context.params['indicator_freq'])
+    except:
+        return
+
+    for security in context.securities:
+         
+         context.signals[security] = signal_function(px, context.params)
+
+def ann(context,data):
+        ps = data.history(context.securities, 'close',
+            context.params['indicator_lookback'], context.params['indicator_freq'])
+        
+        for security in context.securities:
+            ps =   data.history(context.securities, 'close',
+              context.params['indicator_lookback'], context.params['indicator_freq'])
+            split = int(len(ps)*0.8)
+            X_train,  y_train = train_test_split(ps,test_size=0.2,random_state=27)
+            X_train = ps.iloc[:,2:].values
+            y_train = ps.iloc[:,1].values
+            X_test = ps.iloc[:,2:].values
+            y_test = ps.iloc[:,1].values
+            from sklearn.preprocessing import StandardScaler
+            sc = StandardScaler()
+            X_train = sc.fit_transform(X_train)
+            X_test = sc.transform(X_test)
+            from sklearn.neural_network import MLPRegressor
+            mlp = MLPRegressor(hidden_layer_sizes=(10,10,10),max_iter = 100)
+            mlp.fit(X_train,y_train)
+            y_pred = mlp.predict(X_test)               
+        return y_pred
+
+        
+
+def signal_function(px, params):
+    """
+        The main trading logic goes here, called by generate_signals above
+    """
+    
+    ind1 = rsi(px, params['RSI_period'])
+    ind2 = ema(px, params['SMA_period_short'])
+    ind3 = ema(px, params['SMA_period_long'])
+    ind4 = roc(px,params['ROC_period'])
+    ind5=  np.std(ind3)
+    ind6 = ema(px, params['SMA_period_trend'])
+    ind7 = ann(px,params['ANN_period'])
+    
+    
+    
+    
+       if ind1 >75 and (ind3-ind6)/ind6 > -1 and ind4>0.0073 and ind5<ind3 and ind6<ind3 and ann<ind2 :
+        return -1
+    elif ind1 <25 and (ind3-ind6)/ind6 < 1 and ind4<-0.0073 and ind5>ind3 and ind6>ind3 and ann>ind2 :
+        return 1
+    else:
+        return 0
+
+def calculate_entry_price(context, data):
+    # update only if there is a change, i.e. a new entry or exit or a flip
+    # in position for the asset. Also reset for exits
+    px = data.current(context.securities,'close')
+
+    for security in context.securities:
+        if context.entry_price[security] == 0 and \
+           context.target_position[security] !=0:
+            # we entered a fresh position
+                context.entry_price[security] = px[security]
+                context.entry_side[security] = np.sign(context.target_position[security])
+        elif context.entry_price[security] != 0 and \
+             context.target_position[security] == 0:
+            # reset for exits
+                context.entry_price[security] = 0
+                context.entry_side[security] = 0
+        elif np.sign(context.target_position[security]) !=\
+             context.entry_side[security]:
+            # we flipped an existing position
+                context.entry_price[security] = px[security]
+                context.entry_side[security] = np.sign(context.target_position[security])
+
+
+def check_take_prft(context, data):
+
+    px = data.current(context.securities,'close')
+    for security in context.securities:
+        if context.entry_side[security] == 0:
+            continue
+        prft = px[security]/context.entry_price[security]-1
+        if context.entry_side[security] == 1 and\
+            prft > ((context.profit)/context.entry_price[security]):
+            # we were long and hit the stoploss
+               order_target(security, 0.1)
+            # reset data
+               context.entry_price[security] = 0
+               context.entry_side[security] = 0
+               context.target_position[security] = 0
+               return True
+        elif context.entry_side[security] == -1 and\
+            prft < ((-context.profit)/context.entry_price[security]):
+            # we were short and hit the take_prfit
+            order_target(security, 0.1)
+            # reset data
+            context.entry_price[security] = 0
+            context.entry_side[security] = 0
+            context.target_position[security] = 0
+            return True
+
+    return False
+
+def check_stop_loss(context, data):
+    px = data.current(context.securities,'close')
+    for security in context.securities:
+        if context.entry_side[security] == 0:
+            continue
+        loss = px[security]/context.entry_price[security]-1 
+        if context.entry_side[security] == 1 and\
+            loss < -context.stoploss/context.entry_price[security]:
+            # we were long and hit the stoploss
+            order_target(security, 0)
+            # reset data
+            context.entry_price[security] = 0
+            context.entry_side[security] = 0
+            context.target_position[security] = 0
+            return True
+        elif context.entry_side[security] == -1 and\
+            loss > context.stoploss/context.entry_price[security]:
+            # we were short and hit the stoploss
+            order_target(security, 0)
+            # reset data
+            context.entry_price[security] = 0
+            context.entry_side[security] = 0
+            context.target_position[security] = 0
+            return True
+
+    return False
